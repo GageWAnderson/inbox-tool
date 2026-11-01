@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drop → Decide</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#111; --panel:#1b1b1b; --line:#2c2c2c; --fg:#e8e8e8;
+          --dim:#888; --accent:#4da3ff; --ok:#3ecf8e; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system,
+         "SF Mono", Menlo, monospace; height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:16px; padding:10px 16px;
+           border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; font-weight:600; }
+  .tabs { display:flex; gap:4px; }
+  .tabs button { background:var(--panel); color:var(--dim); border:1px solid var(--line);
+                 border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; }
+  .tabs button.active { color:var(--fg); border-color:var(--accent); }
+  #stats { margin-left:auto; color:var(--dim); }
+  #stats b { color:var(--ok); }
+  main { flex:1; display:grid; grid-template-columns:300px 1fr 320px; min-height:0; }
+  #list { overflow-y:auto; border-right:1px solid var(--line); }
+  .row { padding:8px 12px; border-bottom:1px solid var(--line); cursor:pointer;
+         white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--dim); }
+  .row.sel { background:var(--panel); color:var(--fg); border-left:3px solid var(--accent); }
+  #card { padding:24px; display:flex; flex-direction:column; gap:14px; }
+  #title { font-size:22px; font-weight:600; }
+  #artist { font-size:16px; color:var(--dim); }
+  .badges { display:flex; gap:8px; flex-wrap:wrap; }
+  .badge { background:var(--panel); border:1px solid var(--line); border-radius:6px;
+           padding:3px 9px; font-size:12px; }
+  .badge span { color:var(--dim); margin-right:5px; }
+  audio { width:100%; margin-top:6px; }
+  #dests { overflow-y:auto; border-left:1px solid var(--line); padding:14px; }
+  .group { margin-bottom:14px; }
+  .group h2 { font-size:11px; text-transform:uppercase; color:var(--dim);
+              letter-spacing:.08em; margin-bottom:6px; }
+  .dest { display:flex; align-items:center; gap:8px; padding:3px 0; }
+  kbd { background:var(--panel); border:1px solid var(--line); border-bottom-width:2px;
+        border-radius:5px; padding:1px 7px; font-size:12px; min-width:26px;
+        text-align:center; color:var(--accent); }
+  .dest span { color:var(--dim); }
+  footer { padding:8px 16px; border-top:1px solid var(--line); color:var(--dim);
+           font-size:12px; display:flex; gap:18px; }
+  #toast { position:fixed; bottom:52px; left:50%; transform:translateX(-50%);
+           background:var(--ok); color:#0b0f0d; font-weight:600; padding:8px 18px;
+           border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; }
+  #empty { color:var(--dim); text-align:center; margin-top:20vh; font-size:16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Drop → Decide</h1>
+  <div class="tabs">
+    <button id="tab-inbox" class="active">Inbox</button>
+    <button id="tab-review">Review later</button>
+  </div>
+  <div id="stats"></div>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="card"></div>
+  <div id="dests"></div>
+</main>
+<footer>
+  <span><kbd>space</kbd> play/pause</span>
+  <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+  <span><kbd>,</kbd> skip</span>
+  <span><kbd>u</kbd> undo</span>
+  <span><kbd>/</kbd> refresh</span>
+</footer>
+<div id="toast"></div>
+
+<script>
+const GROUPS = [
+  ["Open Format", ["1","2","3","4","5","6","7","8"]],
+  ["Electronic — genre", ["q","w","e","r","t"]],
+  ["Electronic — energy", ["a","s","d"]],
+  ["Tools", ["z","x","c"]],
+  ["", ["v"]],
+];
+let dests = {}, tracks = [], idx = 0, dir = "", placed = 0, sessionStart = Date.now();
+
+const $ = s => document.querySelector(s);
+const audio = Object.assign(document.createElement("audio"), {controls: true});
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 1400);
+}
+
+function renderDests() {
+  $("#dests").innerHTML = GROUPS.map(([name, keys]) =>
+    `<div class="group">${name ? `<h2>${name}</h2>` : ""}` +
+    keys.map(k => `<div class="dest"><kbd>${k}</kbd><span>${dests[k].label}</span></div>`).join("") +
+    `</div>`).join("");
+}
+
+function fmtDur(s) {
+  if (!s) return "—";
+  return `${Math.floor(s/60)}:${String(Math.round(s%60)).padStart(2,"0")}`;
+}
+
+function render() {
+  $("#stats").innerHTML = `<b>${placed}</b> placed · ${tracks.length} remaining`;
+  $("#list").innerHTML = tracks.map((t, i) =>
+    `<div class="row${i===idx?" sel":""}" data-i="${i}">${t.file}</div>`).join("");
+  document.querySelectorAll(".row").forEach(r =>
+    r.onclick = () => select(+r.dataset.i));
+
+  const card = $("#card");
+  const t = tracks[idx];
+  if (!t) {
+    audio.pause();
+    const mins = Math.round((Date.now()-sessionStart)/60000);
+    card.innerHTML = `<div id="empty">Inbox zero — ${placed} placed this session` +
+      (placed ? ` in ${mins} min` : "") + `.</div>`;
+    return;
+  }
+  card.innerHTML = `
+    <div id="title">${t.title || t.file}</div>
+    <div id="artist">${t.artist || "unknown artist"}</div>
+    <div class="badges">
+      ${t.version ? `<div class="badge">${t.version}</div>` : ""}
+      <div class="badge"><span>BPM</span>${t.bpm || "—"}</div>
+      <div class="badge"><span>KEY</span>${t.key || "—"}</div>
+      <div class="badge"><span>GENRE</span>${t.genre || "—"}</div>
+      <div class="badge"><span>LEN</span>${fmtDur(t.duration)}</div>
+      ${t.tagged ? "" : `<div class="badge">no tags — from filename</div>`}
+    </div>`;
+  card.appendChild(audio);
+  audio.src = "/audio/" + encodeURIComponent(t.file) + "?dir=" + dir;
+  audio.play().catch(() => {});
+}
+
+function select(i) {
+  if (!tracks.length) return;
+  idx = Math.max(0, Math.min(i, tracks.length - 1));
+  render();
+}
+
+async function place(key) {
+  const t = tracks[idx];
+  if (!t || !dests[key]) return;
+  try {
+    const res = await api("/api/place", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({file: t.file, dest: key, dir})});
+    toast(`→ ${res.label}${res.placed_as !== t.file ? " (renamed " + res.placed_as + ")" : ""}`);
+    tracks.splice(idx, 1);
+    placed++;
+    select(idx);
+  } catch (e) { toast("error: " + e.message); }
+}
+
+async function undo() {
+  try {
+    const j = await api("/api/undo", {method: "POST"});
+    if (!j.undone) return toast("nothing to undo");
+    toast(`undone: ${j.undone.file}`);
+    placed = Math.max(0, placed - 1);
+    await load();
+  } catch (e) { toast("error: " + e.message); }
+}
+
+async function load() {
+  const j = await api("/api/tracks?dir=" + dir);
+  tracks = j.tracks;
+  idx = Math.min(idx, Math.max(0, tracks.length - 1));
+  render();
+}
+
+function setDir(d) {
+  dir = d; idx = 0;
+  $("#tab-inbox").classList.toggle("active", d === "");
+  $("#tab-review").classList.toggle("active", d === "review_later");
+  load();
+}
+
+$("#tab-inbox").onclick = () => setDir("");
+$("#tab-review").onclick = () => setDir("review_later");
+
+document.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === " ") { e.preventDefault(); audio.paused ? audio.play() : audio.pause(); }
+  else if (k === "arrowdown") { e.preventDefault(); select(idx + 1); }
+  else if (k === "arrowup")   { e.preventDefault(); select(idx - 1); }
+  else if (k === ",")         { select(idx + 1); }
+  else if (k === "u")         { undo(); }
+  else if (k === "/")         { load(); }
+  else if (dests[k])          { place(k); }
+});
+
+(async () => {
+  dests = (await api("/api/config")).destinations;
+  renderDests();
+  await load();
+})();
+</script>
+</body>
+</html>
