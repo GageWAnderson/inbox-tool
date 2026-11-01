@@ -108,3 +108,40 @@ v review_later · , skip · u undo
 - Rekordbox sync
 - Stats page
 - Folder watching (manual refresh is one keypress)
+
+---
+
+# mixtape.py — OBS recording → mixtape WAV
+
+Separate standalone CLI (no server, stdlib-only, needs `ffmpeg` on PATH). Wraps:
+
+```
+ffmpeg -i <src> -vn -acodec pcm_s16le -ar 44100 <dst>
+```
+
+## Usage
+
+```bash
+python3 mixtape.py "2026-10-31 16-15-06.mov"              # prompts: Mix name [mix]:
+python3 mixtape.py "2026-10-31 16-15-06.mov" -n workout_mix
+python3 mixtape.py *.mov -n workout_mix                   # batch -> _1, _2, _3...
+python3 mixtape.py ~/Movies/OBS/ -n workout_mix           # folder -> all videos inside
+python3 mixtape.py ~/Movies/OBS/ -n workout_mix --dry-run # show plan, convert nothing
+```
+
+Output names: `M_D_YYYY_<name>_<n>.wav`, e.g. `10_31_2026_workout_mix_1.wav`.
+
+- **Date**: parsed from `YYYY-MM-DD` in the filename (OBS default), else the file's creation date. No zero-padding.
+- **Name**: `--name`/`-n`, prompted once per run if omitted; sanitized to lowercase snake (`Workout Mix!` → `workout_mix`).
+- **Counter**: `_1`, `_2`… bumps until free, so re-runs and batches never overwrite.
+
+Output folder, resolved in this order (same pattern as music root):
+
+1. `--out /path` CLI flag
+2. `MIXTAPE_OUT` environment variable
+3. `config.json` next to `mixtape.py`: `{"mixtape_out": "/path/to/mixtapes"}`
+4. Fallback: the source file's own folder (prints a note)
+
+Folders are scanned one level deep for `.mov/.mp4/.mkv/.m4v`; explicit file args are taken as-is. Quiet ffmpeg output by default (`-hide_banner -loglevel warning`); `-v/--verbose` shows everything. A failed export deletes its partial WAV. Handy alias: `alias mixtape='python3 ~/Documents/development/inbox_tool/mixtape.py'`.
+
+Tests: `tests/test_mixtape.py` covers date parsing, name sanitizing, the counter, out-dir resolution, the ffmpeg argv, and export (with ffmpeg mocked).
