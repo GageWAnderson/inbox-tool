@@ -5,10 +5,12 @@ Scans playlists/_inbox/, shows track metadata (parsed filename + tags),
 and moves each track into its playlist folder with a single keypress.
 Run: python inbox.py  ->  http://localhost:8791
 """
+import argparse
 import json
 import os
 import re
 import shutil
+import sys
 import urllib.parse
 import webbrowser
 from datetime import datetime, timezone
@@ -23,7 +25,29 @@ except ImportError:  # tags degrade gracefully; placement still works
     mutagen = None
 
 TOOL_DIR = Path(__file__).resolve().parent
-MUSIC_ROOT = Path(os.environ.get("INBOX_MUSIC_ROOT", TOOL_DIR.parent)).resolve()
+
+
+def load_config(tool_dir=TOOL_DIR):
+    """Optional config.json next to inbox.py, e.g. {"music_root": "~/Music/Music/Music"}."""
+    cfg = tool_dir / "config.json"
+    if not cfg.is_file():
+        return {}
+    try:
+        return json.loads(cfg.read_text())
+    except json.JSONDecodeError as e:
+        print(f"config.json: ignoring invalid JSON ({e})", file=sys.stderr)
+        return {}
+
+
+def resolve_music_root(cli=None, env=None, config=None):
+    """Precedence: --music-root flag > INBOX_MUSIC_ROOT env > config.json > tool's parent dir."""
+    env = os.environ if env is None else env
+    config = load_config() if config is None else config
+    raw = cli or env.get("INBOX_MUSIC_ROOT") or config.get("music_root")
+    return Path(raw).expanduser().resolve() if raw else TOOL_DIR.parent
+
+
+MUSIC_ROOT = resolve_music_root()
 PLAYLISTS = MUSIC_ROOT / "playlists"
 PORT = int(os.environ.get("INBOX_PORT", "8791"))
 
@@ -32,31 +56,83 @@ MIME = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".aif": "audio/x-aiff",
         ".aiff": "audio/x-aiff", ".flac": "audio/flac", ".m4a": "audio/mp4"}
 LOG_NAME = "decisions.jsonl"
 
-# key -> (label, path under playlists/)
-DESTINATIONS = {
-    "1": ("classics_never_fail", "open_format/classics_never_fail"),
-    "2": ("current_pop_hip_hop_rnb", "open_format/current_pop_hip_hop_rnb"),
-    "3": ("latin", "open_format/latin"),
-    "4": ("80s", "open_format/80s"),
-    "5": ("90s", "open_format/90s"),
-    "6": ("2000s", "open_format/2000s"),
-    "7": ("2010s", "open_format/2010s"),
-    "8": ("requests", "open_format/requests"),
-    "q": ("dubstep", "electronic/dubstep"),
-    "w": ("house", "electronic/house"),
-    "e": ("big_room", "electronic/big_room"),
-    "r": ("hardstyle", "electronic/hardstyle"),
-    "t": ("melodic_dubstep", "electronic/melodic_dubstep"),
-    "a": ("warm_up", "electronic/warm_up"),
-    "s": ("peak", "electronic/peak"),
-    "d": ("closing", "electronic/closing"),
-    "z": ("samples", "tools/samples"),
-    "x": ("acapellas", "tools/acapellas"),
-    "c": ("edits_transitions", "tools/edits_transitions"),
-    "v": ("review_later", "_inbox/review_later"),
+# key -> (label, path under playlists/, cheat-sheet group)
+# Used when config.json has no "destinations" (or none valid).
+DEFAULT_DESTINATIONS = {
+    "1": ("classics_never_fail", "open_format/classics_never_fail", "Open Format"),
+    "2": ("current_pop_hip_hop_rnb", "open_format/current_pop_hip_hop_rnb", "Open Format"),
+    "3": ("latin", "open_format/latin", "Open Format"),
+    "4": ("80s", "open_format/80s", "Open Format"),
+    "5": ("90s", "open_format/90s", "Open Format"),
+    "6": ("2000s", "open_format/2000s", "Open Format"),
+    "7": ("2010s", "open_format/2010s", "Open Format"),
+    "8": ("requests", "open_format/requests", "Open Format"),
+    "q": ("dubstep", "electronic/dubstep", "Electronic — genre"),
+    "w": ("house", "electronic/house", "Electronic — genre"),
+    "e": ("big_room", "electronic/big_room", "Electronic — genre"),
+    "r": ("hardstyle", "electronic/hardstyle", "Electronic — genre"),
+    "t": ("melodic_dubstep", "electronic/melodic_dubstep", "Electronic — genre"),
+    "a": ("warm_up", "electronic/warm_up", "Electronic — energy"),
+    "s": ("peak", "electronic/peak", "Electronic — energy"),
+    "d": ("closing", "electronic/closing", "Electronic — energy"),
+    "z": ("samples", "tools/samples", "Tools"),
+    "x": ("acapellas", "tools/acapellas", "Tools"),
+    "c": ("edits_transitions", "tools/edits_transitions", "Tools"),
+    "v": ("review_later", "_inbox/review_later", ""),
 }
 
+# Single-char keys the UI already owns (see index.html keydown handler).
+RESERVED_KEYS = {" ", ",", "u", "/"}
+
 VALID_SUBS = ("", "review_later")
+
+
+def _validate_destination(key, spec):
+    """One config "destinations" entry -> (label, path, group) or None (+ warning)."""
+    if not (isinstance(key, str) and len(key) == 1
+            and key == key.lower() and key not in RESERVED_KEYS):
+        print(f"config.json: bad destination key {key!r} "
+              "(need one lowercase, non-reserved char)", file=sys.stderr)
+        return None
+    if not isinstance(spec, dict):
+        print(f"config.json: destination {key!r} must be an object", file=sys.stderr)
+        return None
+    label, rel = spec.get("label"), spec.get("path")
+    group = spec.get("group", "")
+    if not isinstance(label, str) or not label.strip():
+        print(f"config.json: destination {key!r} needs a non-empty \"label\"",
+              file=sys.stderr)
+        return None
+    p = Path(rel) if isinstance(rel, str) else None
+    if p is None or not rel.strip() or p.is_absolute() or ".." in p.parts:
+        print(f"config.json: destination {key!r} has an unsafe \"path\": {rel!r}",
+              file=sys.stderr)
+        return None
+    return label, rel, group if isinstance(group, str) else ""
+
+
+def load_destinations(tool_dir=TOOL_DIR):
+    """Destinations from config.json "destinations" (validated), else the defaults.
+
+    Config form (insertion order = display order):
+      "destinations": {"1": {"label": "...", "path": "open_format/x",
+                             "group": "Open Format"}}
+    Invalid entries are skipped with a warning; if none survive, defaults apply.
+    """
+    raw = load_config(tool_dir).get("destinations")
+    if raw is None:
+        return dict(DEFAULT_DESTINATIONS)
+    dests = {}
+    if isinstance(raw, dict):
+        for key, spec in raw.items():
+            entry = _validate_destination(key, spec)
+            if entry:
+                dests[key] = entry
+    if not dests:
+        print("config.json: no valid \"destinations\" — using built-in defaults",
+              file=sys.stderr)
+        return dict(DEFAULT_DESTINATIONS)
+    return dests
 
 
 # ---------- core logic (importable/testable) ----------
@@ -163,8 +239,9 @@ def _append_log(playlists, entry):
         f.write(json.dumps(entry) + "\n")
 
 
-def place_file(playlists, name, key, sub=""):
-    if key not in DESTINATIONS:
+def place_file(playlists, name, key, sub="", destinations=None):
+    destinations = DEFAULT_DESTINATIONS if destinations is None else destinations
+    if key not in destinations:
         raise ValueError(f"unknown destination key: {key!r}")
     if Path(name).name != name:
         raise ValueError(f"not a plain filename: {name!r}")
@@ -173,7 +250,7 @@ def place_file(playlists, name, key, sub=""):
     if not src.is_file():
         raise FileNotFoundError(name)
 
-    label, rel = DESTINATIONS[key]
+    label, rel = destinations[key][:2]
     dest_dir = playlists / rel
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -236,8 +313,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             self._serve_index()
         elif url.path == "/api/config":
-            self._json({"destinations": {k: {"label": l, "path": p}
-                                         for k, (l, p) in DESTINATIONS.items()}})
+            dests = load_destinations()  # re-read each request: edits need no restart
+            self._json({"destinations": {k: {"label": l, "path": p, "group": g}
+                                         for k, (l, p, g) in dests.items()}})
         elif url.path == "/api/tracks":
             try:
                 self._json({"tracks": list_tracks(PLAYLISTS, sub)})
@@ -259,7 +337,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/api/place":
                 res = place_file(PLAYLISTS, body.get("file", ""),
-                                 body.get("dest", ""), body.get("dir", ""))
+                                 body.get("dest", ""), body.get("dir", ""),
+                                 load_destinations())
                 self._json(res)
             elif url.path == "/api/undo":
                 self._json({"undone": undo_last(PLAYLISTS)})
@@ -328,9 +407,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global MUSIC_ROOT, PLAYLISTS
+    ap = argparse.ArgumentParser(description="Drop -> Decide inbox processor")
+    ap.add_argument("--music-root",
+                    help="folder containing playlists/ (overrides config.json "
+                         "and INBOX_MUSIC_ROOT)")
+    args = ap.parse_args()
+    if args.music_root:
+        MUSIC_ROOT = resolve_music_root(args.music_root)
+        PLAYLISTS = MUSIC_ROOT / "playlists"
+
+    inbox_dir = PLAYLISTS / "_inbox"
+    if not inbox_dir.is_dir():
+        print(f"warning: {inbox_dir} does not exist — set music_root in "
+              "config.json, INBOX_MUSIC_ROOT, or --music-root", file=sys.stderr)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = f"http://localhost:{PORT}"
-    print(f"Drop -> Decide  |  inbox: {PLAYLISTS / '_inbox'}")
+    print(f"Drop -> Decide  |  inbox: {inbox_dir}")
     print(f"Serving on {url}  (Ctrl+C to quit)")
     if not os.environ.get("INBOX_NO_BROWSER"):
         webbrowser.open(url)

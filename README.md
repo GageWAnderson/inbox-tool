@@ -2,7 +2,41 @@
 
 **Drop → Decide**: A keyboard-first local tool to sort new DJ tracks into open-format and electronic playlists.
 
-Location: `~/Music/Music/Music/inbox_tool/` (sibling of `playlists/`, so Rekordbox never scans it)
+Location: anywhere — the path to your music library is configured (see below), not tied to where the tool lives.
+
+## Configuration
+
+The tool needs the folder that contains `playlists/` ("music root"). Resolved in this order:
+
+1. `--music-root /path/to/Music` CLI flag
+2. `INBOX_MUSIC_ROOT` environment variable
+3. `config.json` next to `inbox.py` (gitignored): `{"music_root": "/path/to/Music"}`
+4. Fallback: the tool's own parent directory (i.e. tool sits next to `playlists/`)
+
+The inbox is always `<music_root>/playlists/_inbox`. `~` is expanded. A startup warning is printed if the inbox doesn't exist.
+
+### Destinations
+
+The key → playlist map is data-driven: add a `"destinations"` object to `config.json` to replace the built-in defaults. Reorganizing the library = editing JSON, not code.
+
+```json
+{
+  "music_root": "/path/to/Music",
+  "destinations": {
+    "1": {"label": "classics_never_fail", "path": "open_format/classics_never_fail", "group": "Open Format"},
+    "q": {"label": "dubstep", "path": "electronic/dubstep", "group": "Electronic — genre"},
+    "v": {"label": "review_later", "path": "_inbox/review_later", "group": ""}
+  }
+}
+```
+
+- **key**: one lowercase character. `u` (undo), `,` (skip), `/` (refresh), and space are reserved.
+- **label**: shown in the cheat-sheet.
+- **path**: folder under `playlists/` (created on demand). Absolute paths and `..` are rejected.
+- **group**: optional cheat-sheet heading; entries with the same group cluster together.
+- Object order = display order.
+
+Changes apply without a server restart: press `/` in the UI to reload (both the track list and the key map). Invalid entries are skipped with a stderr warning; if none are valid, the defaults below apply. Undo still works after removing a destination — it reads paths from `decisions.jsonl`, not the config.
 
 ## Stack
 
@@ -17,6 +51,7 @@ Location: `~/Music/Music/Music/inbox_tool/` (sibling of `playlists/`, so Rekordb
 ### 1. `inbox.py` — server + API
 
 - `GET /` → `index.html`
+- `GET /api/config` → destinations from `config.json` (re-read per request, so edits need no restart), falling back to the built-in defaults
 - `GET /api/tracks` → scans `playlists/_inbox/`, returns JSON: `{file, artist, title, version, bpm, key, genre, duration, tagged}` — ignores `decisions.jsonl`, `.DS_Store`, zips
 - `GET /audio/<file>` → streams with Range support (required for click-to-seek in the browser player)
 - `POST /api/place {file, dest}` → moves file (collision → `-2` suffix), appends to `decisions.jsonl`
@@ -44,7 +79,7 @@ One JSON per placement: `{ts, file, from, to}` — permanent audit trail.
 
 Created at build.
 
-## Key map (all 15 destinations + review_later)
+## Default key map (shipped fallback — override via `config.json` destinations)
 
 ```
 OPEN FORMAT                    ELECTRONIC

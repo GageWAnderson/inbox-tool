@@ -73,13 +73,6 @@
 <div id="toast"></div>
 
 <script>
-const GROUPS = [
-  ["Open Format", ["1","2","3","4","5","6","7","8"]],
-  ["Electronic — genre", ["q","w","e","r","t"]],
-  ["Electronic — energy", ["a","s","d"]],
-  ["Tools", ["z","x","c"]],
-  ["", ["v"]],
-];
 let dests = {}, tracks = [], idx = 0, dir = "", placed = 0, sessionStart = Date.now();
 
 const $ = s => document.querySelector(s);
@@ -99,7 +92,13 @@ function toast(msg) {
 }
 
 function renderDests() {
-  $("#dests").innerHTML = GROUPS.map(([name, keys]) =>
+  const groups = new Map();  // bucket by group field, first-seen order
+  for (const [k, d] of Object.entries(dests)) {
+    const g = d.group || "";
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(k);
+  }
+  $("#dests").innerHTML = [...groups].map(([name, keys]) =>
     `<div class="group">${name ? `<h2>${name}</h2>` : ""}` +
     keys.map(k => `<div class="dest"><kbd>${k}</kbd><span>${dests[k].label}</span></div>`).join("") +
     `</div>`).join("");
@@ -179,6 +178,12 @@ async function load() {
   render();
 }
 
+async function refresh() {  // picks up config.json edits without a server restart
+  dests = (await api("/api/config")).destinations;
+  renderDests();
+  await load();
+}
+
 function setDir(d) {
   dir = d; idx = 0;
   $("#tab-inbox").classList.toggle("active", d === "");
@@ -197,15 +202,11 @@ document.addEventListener("keydown", e => {
   else if (k === "arrowup")   { e.preventDefault(); select(idx - 1); }
   else if (k === ",")         { select(idx + 1); }
   else if (k === "u")         { undo(); }
-  else if (k === "/")         { load(); }
+  else if (k === "/")         { refresh(); }
   else if (dests[k])          { place(k); }
 });
 
-(async () => {
-  dests = (await api("/api/config")).destinations;
-  renderDests();
-  await load();
-})();
+(async () => { await refresh(); })();
 </script>
 </body>
 </html>

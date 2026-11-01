@@ -1,5 +1,6 @@
 """Tests for inbox.py — parser, placement, undo, listing. Fixtures use real library filenames."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -51,7 +52,7 @@ def root(tmp_path):
     """Minimal library tree mirroring the real one."""
     playlists = tmp_path / "playlists"
     (playlists / "_inbox" / "review_later").mkdir(parents=True)
-    for rel in inbox.DESTINATIONS.values():
+    for rel in inbox.DEFAULT_DESTINATIONS.values():
         (playlists / rel[1]).mkdir(parents=True, exist_ok=True)
     return playlists
 
@@ -135,6 +136,14 @@ def test_place_rejects_bad_input(root):
         inbox.place_file(root, "ghost.mp3", "q")            # not in inbox
 
 
+def test_place_with_custom_destinations(root):
+    add_inbox_file(root, "track.mp3")
+    dests = {"m": ("my_crate", "crates/my_crate", "Custom")}
+    res = inbox.place_file(root, "track.mp3", "m", destinations=dests)
+    assert (root / "crates" / "my_crate" / "track.mp3").exists()
+    assert res["label"] == "my_crate"
+
+
 # ---------- undo_last ----------
 
 def test_undo_reverses_last_place(root):
@@ -163,3 +172,89 @@ def test_undo_restores_to_review_later_subdir(root):
     inbox.place_file(root, "maybe.mp3", "e", sub="review_later")
     inbox.undo_last(root)
     assert (root / "_inbox" / "review_later" / "maybe.mp3").exists()
+
+
+# ---------- music-root configuration ----------
+
+def test_load_config_missing_returns_empty(tmp_path):
+    assert inbox.load_config(tmp_path) == {}
+
+
+def test_load_config_reads_music_root(tmp_path):
+    (tmp_path / "config.json").write_text('{"music_root": "/some/where"}')
+    assert inbox.load_config(tmp_path) == {"music_root": "/some/where"}
+
+
+def test_load_config_bad_json_returns_empty(tmp_path, capsys):
+    (tmp_path / "config.json").write_text("{not json")
+    assert inbox.load_config(tmp_path) == {}
+    assert "config.json" in capsys.readouterr().err
+
+
+def test_resolve_music_root_precedence():
+    cfg = {"music_root": "/from/config"}
+    env = {"INBOX_MUSIC_ROOT": "/from/env"}
+    assert inbox.resolve_music_root("/from/cli", env=env, config=cfg) == Path("/from/cli")
+    assert inbox.resolve_music_root(env=env, config=cfg) == Path("/from/env")
+    assert inbox.resolve_music_root(env={}, config=cfg) == Path("/from/config")
+    assert inbox.resolve_music_root(env={}, config={}) == inbox.TOOL_DIR.parent
+
+
+def test_resolve_music_root_expands_tilde():
+    got = inbox.resolve_music_root("~/Music", env={}, config={})
+    assert got == Path.home() / "Music"
+
+
+# ---------- destinations configuration ----------
+
+def test_load_destinations_defaults_without_config(tmp_path):
+    assert inbox.load_destinations(tmp_path) == inbox.DEFAULT_DESTINATIONS
+
+
+def test_load_destinations_defaults_when_key_absent(tmp_path):
+    (tmp_path / "config.json").write_text('{"music_root": "/x"}')
+    assert inbox.load_destinations(tmp_path) == inbox.DEFAULT_DESTINATIONS
+
+
+def test_load_destinations_reads_config_and_preserves_order(tmp_path):
+    cfg = {"destinations": {
+        "m": {"label": "my_crate", "path": "crates/my_crate", "group": "Crates"},
+        "1": {"label": "house", "path": "electronic/house"}}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    got = inbox.load_destinations(tmp_path)
+    assert list(got) == ["m", "1"]
+    assert got["m"] == ("my_crate", "crates/my_crate", "Crates")
+    assert got["1"] == ("house", "electronic/house", "")  # group optional
+
+
+def test_load_destinations_skips_bad_entries_keeps_good(tmp_path, capsys):
+    cfg = {"destinations": {
+        "1": {"label": "ok", "path": "open_format/ok"},
+        "u": {"label": "reserved key", "path": "open_format/no"},
+        "2": {"label": "", "path": "open_format/no2"},
+        "3": {"label": "traversal", "path": "../no"}}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    assert inbox.load_destinations(tmp_path) == {"1": ("ok", "open_format/ok", "")}
+    assert capsys.readouterr().err.count("config.json") == 3
+
+
+@pytest.mark.parametrize("key", ["u", ",", "/", " ", "U", "ab", ""])
+def test_load_destinations_rejects_bad_keys(tmp_path, capsys, key):
+    cfg = {"destinations": {key: {"label": "x", "path": "a/b"}}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    assert inbox.load_destinations(tmp_path) == inbox.DEFAULT_DESTINATIONS
+    assert "config.json" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad_path", ["../escape", "/abs/path", "a/../../b", "", "  "])
+def test_load_destinations_rejects_bad_paths(tmp_path, capsys, bad_path):
+    cfg = {"destinations": {"1": {"label": "x", "path": bad_path}}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    assert inbox.load_destinations(tmp_path) == inbox.DEFAULT_DESTINATIONS
+    assert "config.json" in capsys.readouterr().err
+
+
+def test_load_destinations_non_object_uses_defaults(tmp_path, capsys):
+    (tmp_path / "config.json").write_text('{"destinations": ["nope"]}')
+    assert inbox.load_destinations(tmp_path) == inbox.DEFAULT_DESTINATIONS
+    assert "config.json" in capsys.readouterr().err
