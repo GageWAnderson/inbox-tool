@@ -142,6 +142,49 @@ Output folder, resolved in this order (same pattern as music root):
 3. `config.json` next to `mixtape.py`: `{"mixtape_out": "/path/to/mixtapes"}`
 4. Fallback: the source file's own folder (prints a note)
 
-Folders are scanned one level deep for `.mov/.mp4/.mkv/.m4v`; explicit file args are taken as-is. Quiet ffmpeg output by default (`-hide_banner -loglevel warning`); `-v/--verbose` shows everything. A failed export deletes its partial WAV. Handy alias: `alias mixtape='python3 ~/Documents/development/inbox_tool/mixtape.py'`.
+Folders are scanned one level deep for `.mov/.mp4/.mkv/.m4v`; explicit file args are taken as-is; a bare filename that isn't found is also looked up inside each folder arg (`mixtape.py ~/Movies clip.mov -n x`). Quiet ffmpeg output by default (`-hide_banner -loglevel warning`); `-v/--verbose` shows everything. A failed export deletes its partial WAV. Handy alias: `alias mixtape='python3 ~/Documents/development/inbox_tool/mixtape.py'`.
 
 Tests: `tests/test_mixtape.py` covers date parsing, name sanitizing, the counter, out-dir resolution, the ffmpeg argv, and export (with ffmpeg mocked).
+
+---
+
+# cueclear.py — selectively clear cues in a rekordbox XML export
+
+Standalone CLI (stdlib-only, no deps). Fills the rekordbox gap of no bulk cue deletion: export your collection, clear hot and/or memory cues (and loops) on all or some tracks, import the result.
+
+## Workflow
+
+1. In rekordbox: **File → Export Collection in xml format**
+2. `python3 cueclear.py export.xml --memory` (dry-run first with `--dry-run`)
+3. In rekordbox: import the written `export_cleared.xml` — the input file is never modified
+
+## Usage
+
+```bash
+python3 cueclear.py export.xml --memory                          # all memory cues + loops, collection-wide
+python3 cueclear.py export.xml --hot --cues --playlist "Heavy Dubstep"
+python3 cueclear.py export.xml --match "hawkins" --path-contains dubstep
+python3 cueclear.py export.xml --memory --dry-run               # report only, write nothing
+python3 cueclear.py export.xml --memory -o /path/out.xml
+```
+
+**What** (two axes; an omitted axis means "both", no flags at all = all four kinds):
+
+- `--hot` / `--memory` — slot axis: hot cues/loops (slots A–H) vs memory cues/loops
+- `--cues` / `--loops` — shape axis: point cues vs loops
+
+**Which tracks** (multiple selectors narrow each other; none = whole collection; matching 0 tracks aborts):
+
+- `--playlist NAME` — case-insensitive playlist name, resolved via the `<PLAYLISTS>` tree (unknown name → error listing available playlists)
+- `--match TEXT` — case-insensitive substring on title or artist
+- `--path-contains TEXT` — case-insensitive substring on the track's file location
+
+Output defaults to `<name>_cleared.xml` next to the input; `-o` overrides (`--out` equal to the input is refused).
+
+## How it works
+
+- A `<POSITION_MARK>` is classified by `Type` (0 = cue, 4 = loop) and `Num` (−1 = memory, 0–7 = hot slot).
+- Quirk: rekordbox often exports a hot cue *twice* — once colored (`Num ≥ 0`) and once as a memory-cue duplicate at the same position. Clearing `--memory` therefore never touches hot cues.
+- Two-pass: `ElementTree` reads track/playlist metadata; a streaming line filter then copies the file verbatim, dropping only matching `POSITION_MARK` elements (which may wrap across lines). The diff between input and output contains nothing but removed marks.
+
+Tests: `tests/test_cueclear.py` covers classification, flag→kind mapping, playlist/selector resolution, the wrapped-element and duplicate-mark cases, byte-identical passthrough, dry-run, idempotence, and the CLI safety guards.

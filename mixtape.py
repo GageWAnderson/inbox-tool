@@ -101,8 +101,10 @@ def iter_sources(paths):
     """Files and folders -> ordered, deduped list of video files.
 
     Folders are scanned one level deep, sorted by name; explicit files are
-    taken as-is; anything missing is skipped with a warning.
+    taken as-is; anything missing is also tried inside each folder arg
+    (so `mixtape.py ~/Movies clip.mov` works), then skipped with a warning.
     """
+    dirs = [d for d in (Path(raw).expanduser() for raw in paths) if d.is_dir()]
     out, seen = [], set()
     for raw in paths:
         p = Path(raw).expanduser()
@@ -112,8 +114,11 @@ def iter_sources(paths):
         elif p.is_file():
             candidates = [p]
         else:
-            print(f"warning: not found, skipping: {raw}", file=sys.stderr)
-            continue
+            hit = next((d / raw for d in dirs if (d / raw).is_file()), None)
+            if hit is None:
+                print(f"warning: not found, skipping: {raw}", file=sys.stderr)
+                continue
+            candidates = [hit]
         for f in candidates:
             r = f.resolve()
             if r not in seen:

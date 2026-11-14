@@ -152,6 +152,23 @@ def test_iter_sources_missing_warns(tmp_path, capsys):
     assert "nope" in capsys.readouterr().err
 
 
+def test_iter_sources_bare_name_found_in_folder_arg(tmp_path):
+    d = tmp_path / "vids"
+    d.mkdir()
+    mov = d / "clip.mov"; mov.touch()
+    got = mixtape.iter_sources([str(d), "clip.mov"])
+    assert got == [mov]  # deduped with the folder scan, no double export
+
+
+def test_iter_sources_bare_name_not_in_any_folder_warns(tmp_path, capsys):
+    d = tmp_path / "vids"
+    d.mkdir()
+    (d / "clip.mov").touch()
+    got = mixtape.iter_sources([str(d), "other.mov"])
+    assert got == [d / "clip.mov"]
+    assert "other.mov" in capsys.readouterr().err
+
+
 def test_iter_sources_dedupes(tmp_path):
     f = tmp_path / "x.mov"; f.touch()
     got = mixtape.iter_sources([str(f), str(tmp_path)])
