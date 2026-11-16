@@ -35,6 +35,21 @@ def parse_attrs(text):
     return dict(_ATTR.findall(text))
 
 
+def parse_slots(text):
+    """'0-3,6' -> {0,1,2,3,6}. Hot slots are numbered 0-7 (rekordbox A-H)."""
+    slots = set()
+    for part in text.split(","):
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", part.strip())
+        if not m:
+            raise ValueError(f"invalid slot range: {text!r}")
+        lo = int(m.group(1))
+        hi = int(m.group(2)) if m.group(2) is not None else lo
+        if hi < lo or hi > 7:
+            raise ValueError(f"invalid slot range: {text!r}")
+        slots.update(range(lo, hi + 1))
+    return slots
+
+
 def drop_kinds(hot=False, memory=False, cues=False, loops=False):
     """CLI flags -> set of mark kinds to remove. An omitted axis means 'both'."""
     if not (hot or memory):
@@ -108,11 +123,13 @@ def select_tracks(index, playlists, playlist=None, match=None, path_contains=Non
     return ids
 
 
-def filter_lines(lines, drop, targets=None):
+def filter_lines(lines, drop, targets=None, slots=None):
     """Copy lines verbatim, dropping POSITION_MARK elements of the given kinds.
 
     `drop`: set of kinds from drop_kinds(). `targets`: set of TrackIDs to
-    touch, or None for the whole collection. Returns (out_lines, stats) where
+    touch, or None for the whole collection. `slots`: set of hot slot numbers
+    to restrict removal to, or None for no restriction — memory marks
+    (Num="-1") never match a slot filter. Returns (out_lines, stats) where
     stats has per-kind counts and the set of affected TrackIDs.
 
     POSITION_MARK elements may wrap across lines, so they're collected until
@@ -129,7 +146,9 @@ def filter_lines(lines, drop, targets=None):
     def flush(text):
         attrs = parse_attrs(text)
         kind = classify_mark(attrs)
-        if current_track is not None and kind in drop \
+        num = attrs.get("Num", "-1")
+        in_slots = slots is None or (num.isdigit() and int(num) in slots)
+        if current_track is not None and kind in drop and in_slots \
                 and (targets is None or current_track in targets):
             stats[kind] += 1
             stats["tracks"].add(current_track)
@@ -182,6 +201,9 @@ def main(argv=None):
                     help="restrict to point cues")
     ap.add_argument("--loops", action="store_true",
                     help="restrict to loops")
+    ap.add_argument("--slots",
+                    help="only clear hot cues/loops in these slots (0-7 = A-H), "
+                         "e.g. 0-3 or 0,2,5; memory cues have no slot")
     ap.add_argument("--playlist",
                     help="only tracks in this playlist (name, case-insensitive)")
     ap.add_argument("--match",
@@ -219,9 +241,19 @@ def main(argv=None):
             sys.exit("error: selectors matched 0 tracks — nothing to do")
         print(f"targets: {len(targets)} track(s)")
 
+    slots = None
+    if args.slots is not None:
+        if args.memory and not args.hot:
+            sys.exit("error: --slots only applies to hot cues/loops "
+                     "(memory cues have no slot number)")
+        try:
+            slots = parse_slots(args.slots)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
+
     drop = drop_kinds(args.hot, args.memory, args.cues, args.loops)
     with src.open(encoding="utf-8", newline="") as f:
-        out_lines, stats = filter_lines(f, drop, targets)
+        out_lines, stats = filter_lines(f, drop, targets, slots=slots)
 
     summary = summarize(stats)
     if args.dry_run:

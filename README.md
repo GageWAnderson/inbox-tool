@@ -163,6 +163,8 @@ Standalone CLI (stdlib-only, no deps). Fills the rekordbox gap of no bulk cue de
 ```bash
 python3 cueclear.py export.xml --memory                          # all memory cues + loops, collection-wide
 python3 cueclear.py export.xml --hot --cues --playlist "Heavy Dubstep"
+python3 cueclear.py export.xml --slots 0-6                       # hot cues/loops in slots 0-6 only
+python3 cueclear.py export.xml --slots 0,2,5 --cues              # point cues in slots 0, 2 and 5
 python3 cueclear.py export.xml --match "hawkins" --path-contains dubstep
 python3 cueclear.py export.xml --memory --dry-run               # report only, write nothing
 python3 cueclear.py export.xml --memory -o /path/out.xml
@@ -172,6 +174,7 @@ python3 cueclear.py export.xml --memory -o /path/out.xml
 
 - `--hot` / `--memory` — slot axis: hot cues/loops (slots A–H) vs memory cues/loops
 - `--cues` / `--loops` — shape axis: point cues vs loops
+- `--slots RANGE` — further narrows removal to hot slots `0–7` (= A–H), as `0-3`, `0,2,5`, or mixed. Memory cues have no slot (`Num="-1"`), so they are never matched by `--slots`; combining it with `--memory` alone is rejected.
 
 **Which tracks** (multiple selectors narrow each other; none = whole collection; matching 0 tracks aborts):
 
@@ -187,4 +190,4 @@ Output defaults to `<name>_cleared.xml` next to the input; `-o` overrides (`--ou
 - Quirk: rekordbox often exports a hot cue *twice* — once colored (`Num ≥ 0`) and once as a memory-cue duplicate at the same position. Clearing `--memory` therefore never touches hot cues.
 - Two-pass: `ElementTree` reads track/playlist metadata; a streaming line filter then copies the file verbatim, dropping only matching `POSITION_MARK` elements (which may wrap across lines). The diff between input and output contains nothing but removed marks.
 
-Tests: `tests/test_cueclear.py` covers classification, flag→kind mapping, playlist/selector resolution, the wrapped-element and duplicate-mark cases, byte-identical passthrough, dry-run, idempotence, and the CLI safety guards.
+Tests: `tests/test_cueclear.py` covers classification, flag→kind mapping, slot-range parsing, playlist/selector resolution, the wrapped-element and duplicate-mark cases, byte-identical passthrough, dry-run, idempotence, and the CLI safety guards.

@@ -103,6 +103,25 @@ def test_drop_kinds(hot, memory, cues, loops, exp):
     assert cueclear.drop_kinds(hot, memory, cues, loops) == exp
 
 
+# ---------- parse_slots ----------
+
+@pytest.mark.parametrize("text,exp", [
+    ("0-3", {0, 1, 2, 3}),
+    ("0,2,5", {0, 2, 5}),
+    ("0-1,4", {0, 1, 4}),
+    ("3", {3}),
+    ("7-7", {7}),
+])
+def test_parse_slots(text, exp):
+    assert cueclear.parse_slots(text) == exp
+
+
+@pytest.mark.parametrize("text", ["8", "5-2", "x", "", "0-", "-3", "0-9", "1,,2"])
+def test_parse_slots_rejects_invalid(text):
+    with pytest.raises(ValueError):
+        cueclear.parse_slots(text)
+
+
 # ---------- collection_index / parse_playlists ----------
 
 def test_collection_index():
@@ -154,8 +173,9 @@ def test_selectors_narrow_each_other():
 
 # ---------- filter_lines ----------
 
-def run_filter(text, drop, targets=None):
-    return cueclear.filter_lines(text.splitlines(keepends=True), drop, targets)
+def run_filter(text, drop, targets=None, slots=None):
+    return cueclear.filter_lines(text.splitlines(keepends=True), drop, targets,
+                                 slots=slots)
 
 
 def test_filter_empty_drop_is_byte_identical():
@@ -201,6 +221,43 @@ def test_filter_playlist_track_key_lines_untouched():
     out, _ = run_filter(FIXTURE, ALL_KINDS, targets={"111", "222", "333"})
     text = "".join(out)
     assert '<TRACK Key="111"/>' in text  # playlist section is not collection TRACK
+
+
+def test_filter_slots_removes_only_matching_nums():
+    out, stats = run_filter(FIXTURE, ALL_KINDS, slots={0})
+    text = "".join(out)
+    assert 'Start="0.475" Num="0"' not in text  # slot 0 hot cue gone
+    assert 'Start="38.094" Num="3"' in text     # slot 3 hot cue kept
+    assert 'Start="40.021"' in text             # slot 6 hot loop kept
+    assert text.count('Num="-1"') == 2          # memory marks never match a slot
+    assert stats == {"hot_cue": 1, "memory_cue": 0, "hot_loop": 0,
+                     "memory_loop": 0, "tracks": {"111"}}
+
+
+def test_filter_slots_range_hits_wrapped_mark_and_loop():
+    out, stats = run_filter(FIXTURE, ALL_KINDS, slots={1, 2, 3, 4, 5, 6})
+    text = "".join(out)
+    assert 'Start="0.475" Num="0"' in text      # slot 0 outside range
+    assert 'Start="38.094"' not in text         # slot 3, wrapped element dropped whole
+    assert 'Blue="255"' not in text             # its continuation line went with it
+    assert 'Start="40.021"' not in text         # slot 6 hot loop gone
+    assert 'Green="180"' not in text            # no orphan continuation line
+    assert stats["hot_cue"] == 1 and stats["hot_loop"] == 1
+    assert stats["tracks"] == {"111", "222"}
+
+
+def test_filter_slots_never_touches_memory_marks():
+    out, stats = run_filter(FIXTURE, {"memory_cue", "memory_loop"}, slots={0, 1, 2, 3})
+    text = "".join(out)
+    assert text.count('Num="-1"') == 2  # Num=-1 is not a slot number
+    assert stats["tracks"] == set()
+
+
+def test_filter_slots_none_is_unfiltered():
+    out, stats = run_filter(FIXTURE, {"hot_cue"})
+    text = "".join(out)
+    assert 'Num="0"' not in text and 'Num="3"' not in text
+    assert stats["hot_cue"] == 2
 
 
 # ---------- main / end-to-end ----------
@@ -268,3 +325,36 @@ def test_main_idempotent_rerun_clears_nothing(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "nothing" in out
     assert (tmp_path / "export_cleared_cleared.xml").read_text(encoding="utf-8") == cleared
+
+
+def test_main_slots_clears_only_that_range(tmp_path):
+    run_main(tmp_path, "--slots", "3-7")
+    out = (tmp_path / "export_cleared.xml").read_text(encoding="utf-8")
+    assert 'Num="3"' not in out                 # slot 3 hot cue gone
+    assert 'Start="40.021"' not in out          # slot 6 hot loop gone
+    assert 'Start="0.475" Num="0"' in out       # slot 0 kept
+    assert out.count('Num="-1"') == 2           # memory marks kept
+    ET.fromstring(out)                          # output is well-formed XML
+
+
+def test_main_slots_combines_with_shape_and_track_selectors(tmp_path):
+    run_main(tmp_path, "--slots", "0,3,6", "--cues", "--playlist", "Heavy Dubstep")
+    out = (tmp_path / "export_cleared.xml").read_text(encoding="utf-8")
+    assert 'Num="0"' not in out and 'Num="3"' not in out  # both hot cues on 111
+    assert 'Start="40.021"' in out  # 222 is a loop outside the playlist
+
+
+def test_main_rejects_invalid_slots(tmp_path):
+    src = tmp_path / "export.xml"
+    src.write_text(FIXTURE, encoding="utf-8")
+    with pytest.raises(SystemExit):
+        cueclear.main([str(src), "--slots", "5-2"])
+    assert not (tmp_path / "export_cleared.xml").exists()
+
+
+def test_main_rejects_slots_with_memory_only(tmp_path):
+    src = tmp_path / "export.xml"
+    src.write_text(FIXTURE, encoding="utf-8")
+    with pytest.raises(SystemExit):
+        cueclear.main([str(src), "--slots", "0-3", "--memory"])
+    assert not (tmp_path / "export_cleared.xml").exists()
